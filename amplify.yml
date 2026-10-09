@@ -1,0 +1,21 @@
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - nvm install 22 && nvm use 22
+        - export GO_VERSION=1.27.2
+        - curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /tmp
+        - export PATH="/tmp/go/bin:$PATH" && go version
+        - npm ci
+    build:
+      commands:
+        - export PATH="/tmp/go/bin:$PATH"
+        - npm run build
+  artifacts:
+    baseDirectory: dist
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - node_modules/**/*
