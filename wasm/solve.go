@@ -83,7 +83,6 @@ type PlacedItem struct {
 	Rotation int     `json:"rotation"`
 	Weight   float64 `json:"weight"`
 	Support  float64 `json:"support"`
-	Load     float64 `json:"load"`
 }
 
 // BinResult is one used bin.
@@ -565,7 +564,6 @@ func buildResponse(r *model.Result, binSpec func(*model.Bin) int, itemSpec map[s
 				Rotation: int(it.RotationType),
 				Weight:   it.Weight,
 				Support:  round(stability.SupportRatio(it, b.Items)),
-				Load:     round(stability.WeightAbove(it, b.Items)),
 			}
 		}
 		resp.Bins = append(resp.Bins, out)
