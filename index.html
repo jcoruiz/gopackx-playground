@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GoPackX Playground · 3D bin packing in your browser</title>
+    <meta
+      name="description"
+      content="Try GoPackX, a 3D bin packing library for Go, live in your browser through WebAssembly. Compare engines, strategies and solvers, and check every result."
+    />
+    <meta property="og:title" content="GoPackX Playground" />
+    <meta property="og:description" content="3D bin packing in Go, running in your browser through WebAssembly." />
+    <meta property="og:type" content="website" />
+    <meta name="theme-color" content="#121211" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="/" aria-label="GoPackX Playground home">
+        <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
+          <path d="M16 2 29 9v14l-13 7L3 23V9z" fill="#2a78d6" />
+          <path d="M16 2 29 9l-13 7L3 9z" fill="#86b6ef" />
+          <path d="M16 16v14l13-7V9z" fill="#1c5cab" />
+          <path d="M9.5 5.5 22.5 12.5v6" stroke="#121211" stroke-width="2" fill="none" />
+        </svg>
+        <span class="brand-name">GoPackX</span>
+        <span class="brand-sub">Playground</span>
+      </a>
+      <p class="tagline">3D bin packing in Go, compiled to WebAssembly and running in your browser. Your data never leaves this page.</p>
+      <nav class="links" aria-label="Project links">
+        <a href="https://github.com/jcoruiz/gopackx" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://pkg.go.dev/github.com/jcoruiz/gopackx" target="_blank" rel="noopener">Docs</a>
+        <a href="https://github.com/jcoruiz/gopackx-benchmark" target="_blank" rel="noopener">Benchmark</a>
+      </nav>
+    </header>
+
+    <div class="banner" id="banner" hidden></div>
+
+    <main class="layout">
+      <aside class="panel scenario" aria-label="Scenario">
+        <label class="field">
+          <span>Scenario</span>
+          <select id="preset"></select>
+        </label>
+        <p class="about" id="preset-about"></p>
+        <div class="actions">
+          <button type="button" class="ghost" id="btn-generate" aria-expanded="false">Generate</button>
+          <button type="button" class="ghost" id="btn-import">Import</button>
+          <button type="button" class="ghost" id="btn-export">Export</button>
+          <button type="button" class="ghost" id="btn-share">Share link</button>
+          <input type="file" id="import-file" accept="application/json,.json" hidden />
+        </div>
+        <form class="generate" id="generate-form" hidden>
+          <label class="field"><span>Items</span><input type="number" name="items" min="1" max="5000" value="300" /></label>
+          <label class="field"><span>Item types</span><input type="number" name="skus" min="1" max="300" value="8" /></label>
+          <label class="field"><span>Seed</span><input type="number" name="seed" min="0" value="42" /></label>
+          <button type="submit" class="primary small">Create</button>
+        </form>
+
+        <section class="block">
+          <header>
+            <h2>Boxes</h2>
+            <span class="hint" id="bins-hint"></span>
+            <button type="button" class="ghost small" id="add-bin">+ Box</button>
+          </header>
+          <div class="table-wrap" id="bins-table"></div>
+        </section>
+
+        <section class="block">
+          <header>
+            <h2>Items</h2>
+            <span class="hint" id="items-hint"></span>
+            <button type="button" class="ghost small" id="add-item">+ Item</button>
+          </header>
+          <div class="table-wrap" id="items-table"></div>
+        </section>
+        <p class="units">Any length unit works (cm in the examples). Weights in kg. Height (H) is the vertical axis.</p>
+      </aside>
+
+      <section class="work">
+        <div class="panel solver" aria-label="Solver settings">
+          <div class="solver-row">
+            <label class="field">
+              <span>Solver</span>
+              <select id="mode"></select>
+            </label>
+            <label class="field" data-show="engine">
+              <span>Placement engine</span>
+              <select id="engine"></select>
+            </label>
+            <label class="field" data-show="strategy">
+              <span>Strategy</span>
+              <select id="strategy"></select>
+            </label>
+            <label class="field narrow">
+              <span>Min. support</span>
+              <span class="with-unit"><input type="number" id="stability" min="0" max="100" step="5" /><i>%</i></span>
+            </label>
+            <label class="field narrow">
+              <span>Time limit</span>
+              <span class="with-unit"><input type="number" id="timeout" min="0.1" max="60" step="0.5" /><i>s</i></span>
+            </label>
+            <label class="check" data-show="lookahead"><input type="checkbox" id="lookahead" /> Lookahead</label>
+            <label class="field narrow" data-show="meta"><span>Max iterations</span><input type="number" id="max-iter" min="1" step="100" /></label>
+            <label class="field narrow" data-show="meta"><span>Stop after no gain</span><input type="number" id="max-no-improve" min="1" step="50" /></label>
+            <label class="check" data-show="bbfull"><input type="checkbox" id="bb-full" /> Try rotations (Full)</label>
+            <div class="run">
+              <label class="check" title="Run again whenever something changes"><input type="checkbox" id="auto-run" checked /> Auto</label>
+              <button type="button" class="primary" id="btn-run" title="Ctrl/⌘ + Enter">Run</button>
+            </div>
+          </div>
+          <p class="about" id="mode-about"></p>
+        </div>
+
+        <div class="viewer-card">
+          <div class="viewer" id="viewer"></div>
+          <div class="viewer-top">
+            <div class="bin-nav">
+              <button type="button" class="icon" id="bin-prev" aria-label="Previous box">‹</button>
+              <select id="bin-select" aria-label="Box to show"></select>
+              <button type="button" class="icon" id="bin-next" aria-label="Next box">›</button>
+            </div>
+            <div class="viewer-tools">
+              <label class="field inline"><span>Color</span><select id="color-mode"></select></label>
+              <button type="button" class="ghost small" id="btn-fit">Reset view</button>
+            </div>
+          </div>
+          <div class="legend" id="legend"></div>
+          <div class="steps">
+            <button type="button" class="icon" id="btn-play" aria-label="Replay placement order">▶</button>
+            <input type="range" id="step" min="0" max="0" value="0" aria-label="Items shown in placement order" />
+            <span id="step-label"></span>
+          </div>
+          <div class="tooltip" id="tooltip" hidden></div>
+          <div class="viewer-empty" id="viewer-empty">Run a solver to see the packing.</div>
+          <div class="busy" id="busy" hidden>
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="busy-label">Solving…</span>
+            <button type="button" class="ghost small" id="btn-stop">Stop</button>
+          </div>
+        </div>
+
+        <div class="panel results">
+          <nav class="tabs" role="tablist">
+            <button type="button" role="tab" data-tab="result" aria-selected="true">Result</button>
+            <button type="button" role="tab" data-tab="checks" aria-selected="false">Checks <span id="checks-badge"></span></button>
+            <button type="button" role="tab" data-tab="compare" aria-selected="false">Compare</button>
+            <button type="button" role="tab" data-tab="code" aria-selected="false">Go code</button>
+          </nav>
+          <div class="tab-panel" id="tab-result" role="tabpanel"></div>
+          <div class="tab-panel" id="tab-checks" role="tabpanel" hidden></div>
+          <div class="tab-panel" id="tab-compare" role="tabpanel" hidden></div>
+          <div class="tab-panel" id="tab-code" role="tabpanel" hidden></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot" id="footer"></footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

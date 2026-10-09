@@ -1,0 +1,22 @@
+{
+  "name": "gopackx-playground",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wasm": "scripts/build-wasm.sh",
+    "dev": "npm run wasm && vite",
+    "build": "npm run wasm && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "npm run wasm && vitest run"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/three": "^0.186.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^4.1.11"
+  }
+}
