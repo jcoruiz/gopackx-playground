@@ -438,6 +438,13 @@ tr.extra td {
   align-items: end;
 }
 
+.version-note {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface-1));
+}
+
 .solver-row .run {
   margin-left: auto;
   display: flex;

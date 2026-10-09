@@ -9,14 +9,14 @@ export class Cancelled extends Error {
 
 type Pending = { resolve: (r: SolveResponse) => void; reject: (e: Error) => void };
 
-/** Client for the solver worker. One solve runs at a time; others queue. */
+/** Client for the worker that runs one GoPackX version. One solve runs at a time; others queue. */
 export class Solver {
   private worker!: Worker;
   private pending = new Map<number, Pending>();
   private seq = 0;
   ready!: Promise<BuildInfo>;
 
-  constructor() {
+  constructor(readonly version: string) {
     this.spawn();
   }
 
@@ -43,13 +43,19 @@ export class Solver {
     // Callers that await ready still see the failure; this only avoids an
     // unhandled rejection for respawns nobody waits on.
     this.ready.catch(() => {});
+    this.worker.postMessage({ type: 'init', version: this.version } satisfies WorkerIn);
+  }
+
+  /** Whether a solve is running or queued. */
+  get busy(): boolean {
+    return this.pending.size > 0;
   }
 
   solve(request: SolveRequest): Promise<SolveResponse> {
     const id = ++this.seq;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, request } satisfies WorkerIn);
+      this.worker.postMessage({ type: 'solve', id, request } satisfies WorkerIn);
     });
   }
 

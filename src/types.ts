@@ -67,7 +67,6 @@ export interface PlacedItem {
   rotation: number;
   weight: number;
   support: number;
-  load: number;
 }
 
 export interface BinResult {

@@ -6,6 +6,8 @@ export interface Preset {
   about: string;
   scenario: Scenario;
   config: Partial<SolverConfig>;
+  /** Set on cases that show a bug: the release that fixed it. */
+  fixedIn?: string;
 }
 
 const bin = (id: string, w: number, h: number, d: number, maxWeight: number, qty = 1, cost = 0): BinSpec => ({
@@ -124,6 +126,37 @@ export const PRESETS: Preset[] = [
     about: 'Random items from a fixed seed. Change the size or seed under "Generate" to test your own load.',
     scenario: randomScenario({ items: 300, skus: 8, seed: 42 }),
     config: { mode: 'pack' },
+  },
+  {
+    key: 'fixed-fragile',
+    name: 'Weight on a fragile item',
+    about:
+      'Found by fuzzing GoPackX v0.2.2: it slides the glass plate under the overhang of a carton placed earlier, so the carton rests on it. v0.3.0 packs the same items without that. Compare them in the Versions tab.',
+    scenario: {
+      bins: [bin('Box', 30, 30, 30, 30, 1)],
+      items: [
+        item('Carton A', 10, 10, 20, 1),
+        item('Carton B', 25, 20, 10, 1),
+        item('Carton C', 30, 5, 20, 1),
+        item('Carton D', 10, 15, 10, 1),
+        item('Carton E', 5, 15, 25, 1),
+        item('Glass plate', 15, 5, 15, 1, 1, { fragile: true }),
+      ],
+    },
+    config: { mode: 'packer', engine: 'pivot' },
+    fixedIn: 'v0.3.0',
+  },
+  {
+    key: 'fixed-load',
+    name: 'Load limit exceeded',
+    about:
+      'Found by fuzzing GoPackX v0.2.2: the egg tray holds at most 1 kg, but it slides the tray under the overhang of the 8 kg case, which rests 1.6 kg on it. v0.3.0 finds a spot where nothing rests on the tray. Compare them in the Versions tab.',
+    scenario: {
+      bins: [bin('Box', 30, 30, 30, 30, 1)],
+      items: [item('Tool case', 25, 30, 10, 8), item('Carton', 30, 20, 20, 1), item('Egg tray', 30, 5, 20, 3, 1, { loadBear: 1 })],
+    },
+    config: { mode: 'packer', engine: 'laff', stability: 0.7 },
+    fixedIn: 'v0.3.0',
   },
 ];
 

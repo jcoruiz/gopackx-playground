@@ -80,6 +80,10 @@
       <section class="work">
         <div class="panel solver" aria-label="Solver settings">
           <div class="solver-row">
+            <label class="field" title="The GoPackX release that runs">
+              <span>GoPackX</span>
+              <select id="version"></select>
+            </label>
             <label class="field">
               <span>Solver</span>
               <select id="mode"></select>
@@ -110,6 +114,7 @@
             </div>
           </div>
           <p class="about" id="mode-about"></p>
+          <p class="about version-note" id="version-note" hidden></p>
         </div>
 
         <div class="viewer-card">
@@ -145,11 +150,13 @@
             <button type="button" role="tab" data-tab="result" aria-selected="true">Result</button>
             <button type="button" role="tab" data-tab="checks" aria-selected="false">Checks <span id="checks-badge"></span></button>
             <button type="button" role="tab" data-tab="compare" aria-selected="false">Compare</button>
+            <button type="button" role="tab" data-tab="versions" aria-selected="false">Versions</button>
             <button type="button" role="tab" data-tab="code" aria-selected="false">Go code</button>
           </nav>
           <div class="tab-panel" id="tab-result" role="tabpanel"></div>
           <div class="tab-panel" id="tab-checks" role="tabpanel" hidden></div>
           <div class="tab-panel" id="tab-compare" role="tabpanel" hidden></div>
+          <div class="tab-panel" id="tab-versions" role="tabpanel" hidden></div>
           <div class="tab-panel" id="tab-code" role="tabpanel" hidden></div>
         </div>
       </section>

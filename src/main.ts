@@ -18,18 +18,22 @@ import {
   type EngineName,
   type ItemSpec,
   type Mode,
+  type PlacedItem,
   type Scenario,
   type SolveRequest,
   type SolveResponse,
   type SolverConfig,
   type StrategyName,
 } from './types';
-import { summarize, verify, type Check } from './verify';
+import { keepsDirectLoadLimits, loads, summarize, verify, type Check } from './verify';
+import { CHANGELOG, LATEST, RELEASES, rules } from './versions';
 import { Viewer } from './viewer';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 interface Run {
+  /** GoPackX release that produced the result. */
+  version: string;
   req: SolveRequest;
   res: SolveResponse;
   checks: Check[];
@@ -38,6 +42,12 @@ interface Run {
 interface CompareRow {
   solver: string;
   config: SolverConfig;
+  run?: Run;
+  error?: string;
+}
+
+interface VersionRow {
+  version: string;
   run?: Run;
   error?: string;
 }
@@ -53,14 +63,36 @@ const state = {
   bin: 0,
   colorMode: 'type' as ColorMode,
   compare: [] as CompareRow[],
-  comparing: false,
+  versions: [] as VersionRow[],
+  /** Which comparison is running, if any. Single runs wait for it. */
+  comparing: '' as '' | 'engines' | 'versions',
   sort: { key: 'rank' as SortKey, dir: 1 },
   share: '',
-  info: null as BuildInfo | null,
+  version: LATEST,
+  infos: new Map<string, BuildInfo>(),
 };
 
-const solver = new Solver();
 const viewer = new Viewer($('viewer'));
+
+// One worker per GoPackX release, started the first time it is needed, so
+// a visit downloads only the versions it runs.
+const solvers = new Map<string, Solver>();
+
+function solverFor(version: string): Solver {
+  let s = solvers.get(version);
+  if (!s) {
+    s = new Solver(version);
+    solvers.set(version, s);
+    s.ready.then(
+      (info) => {
+        state.infos.set(version, info);
+        if (version === state.version) renderFooter();
+      },
+      (err: Error) => banner(`GoPackX ${version} could not start in this browser: ${err.message}. WebAssembly and Web Workers are required.`),
+    );
+  }
+  return s;
+}
 
 // ---------------------------------------------------------------- formatting
 
@@ -90,17 +122,29 @@ function banner(msg: string): void {
 // ---------------------------------------------------------------- scenario
 
 function loadSnapshot(snap: Snapshot, preset: string): void {
+  if (state.comparing) stop();
   state.scenario = structuredClone(snap.scenario);
   state.config = { ...snap.config };
   state.preset = preset;
   state.compare = [];
+  state.versions = [];
+  if (snap.version && snap.version !== state.version) {
+    state.version = snap.version;
+    $<HTMLSelectElement>('version').value = snap.version;
+    renderFooter();
+  }
   state.colorMode = state.scenario.items.some((s) => s.fragile || s.loadBear > 0) ? 'flags' : 'type';
   $<HTMLSelectElement>('color-mode').value = state.colorMode;
   renderScenario();
   renderSolverBar();
   renderCode();
   renderCompare();
-  void run();
+  renderVersions();
+  // Cases that show a fixed bug open on the version comparison.
+  if (PRESETS.find((p) => p.key === preset)?.fixedIn) {
+    selectTab('versions');
+    void runVersions();
+  } else void run();
 }
 
 function loadPreset(key: string): void {
@@ -108,11 +152,33 @@ function loadPreset(key: string): void {
   loadSnapshot({ scenario: p.scenario, config: { ...DEFAULT_CONFIG, ...p.config } }, p.key);
 }
 
+/** Switches the GoPackX release. Callers decide whether to run. */
+function setVersion(v: string): void {
+  if (v === state.version) return;
+  state.version = v;
+  $<HTMLSelectElement>('version').value = v;
+  if (state.compare.length) {
+    // That comparison ran on the other release.
+    state.compare = [];
+    renderCompare();
+  }
+  if (location.hash) history.replaceState(null, '', location.pathname);
+  renderSolverBar();
+  renderBins();
+  renderCode();
+  renderFooter();
+  renderVersions();
+}
+
 function renderScenario(): void {
   const sel = $<HTMLSelectElement>('preset');
+  const option = (p: (typeof PRESETS)[number]) => html`<option value="${p.key}">${p.name}</option>`;
+  const fixed = [...new Set(PRESETS.map((p) => p.fixedIn).filter(Boolean))] as string[];
   mount(
     sel,
-    html`${PRESETS.map((p) => html`<option value="${p.key}">${p.name}</option>`)}${state.preset ? '' : html`<option value="">Custom</option>`}`,
+    html`<optgroup label="Examples">${PRESETS.filter((p) => !p.fixedIn).map(option)}</optgroup>
+      ${fixed.map((v) => html`<optgroup label="Bugs fixed in ${v}">${PRESETS.filter((p) => p.fixedIn === v).map(option)}</optgroup>`)}
+      ${state.preset ? '' : html`<option value="">Custom</option>`}`,
   );
   sel.value = state.preset;
   $('preset-about').textContent = PRESETS.find((p) => p.key === state.preset)?.about ?? 'Your own scenario. Share it with the link button.';
@@ -127,7 +193,7 @@ function renderBins(): void {
     $('bins-table'),
     html`<table class="grid">
       <thead><tr>
-        <th>Name</th><th>W</th><th>H</th><th>D</th><th>Max kg</th><th>Cost</th>
+        <th>Name</th><th>W</th><th>H</th><th>D</th><th title="${maxKgHint()}">Max kg</th><th>Cost</th>
         <th class="qty" title="Stock: how many of this box exist. Used by the fixed-box solvers.">Qty</th><th></th>
       </tr></thead>
       <tbody>${state.scenario.bins.map(
@@ -141,6 +207,12 @@ function renderBins(): void {
     </table>`,
   );
   binsHint();
+}
+
+function maxKgHint(): string {
+  return rules(state.version).zeroWeightIsUnlimited
+    ? 'Weight limit in kg. 0 means no limit.'
+    : `Weight limit in kg. In ${state.version}, 0 means the box holds nothing.`;
 }
 
 function binsHint(): void {
@@ -259,6 +331,13 @@ function changed(scenarioEdit: boolean): void {
     state.compare = [];
     renderCompare();
   }
+  // A running comparison is for the scenario before this edit; a version
+  // comparison also for the settings before it.
+  if (state.comparing === 'versions' || (scenarioEdit && state.comparing === 'engines')) stop();
+  if (state.versions.length) {
+    state.versions = [];
+    renderVersions();
+  }
   renderCode();
   scheduleRun();
 }
@@ -280,6 +359,11 @@ function setupSolverBar(): void {
     html`<optgroup label="Box catalog: the solver picks the boxes">${catalog.map((m) => html`<option value="${m}">${MODES[m].label}</option>`)}</optgroup>
       <optgroup label="Fixed boxes: Qty is the stock">${fixed.map((m) => html`<option value="${m}">${MODES[m].label}</option>`)}</optgroup>`,
   );
+  mount(
+    $('version'),
+    html`${RELEASES.map((r) => html`<option value="${r.version}" title="Released ${r.released}">${r.version}${r.version === LATEST ? ' (latest)' : ''}</option>`)}`,
+  );
+  $<HTMLSelectElement>('version').value = state.version;
   mount($('engine'), html`${(Object.keys(ENGINES) as EngineName[]).map((e) => html`<option value="${e}">${ENGINES[e].label}</option>`)}`);
   mount(
     $('strategy'),
@@ -337,8 +421,24 @@ function renderSolverBar(): void {
   document.querySelectorAll<HTMLElement>('[data-show]').forEach((el) => (el.hidden = !show[el.dataset.show!]));
 
   const engine = c.mode === 'parallel' ? '' : ` Engine: ${ENGINES[c.engine].about}`;
-  const support = c.stability > 0 ? ` Each item needs ${Math.round(c.stability * 100)}% of its base supported, and load limits apply.` : '';
+  const fullStack = rules(state.version).fullStackLoad;
+  const support =
+    c.stability > 0
+      ? ` Each item needs ${Math.round(c.stability * 100)}% of its base supported${fullStack ? '' : ', and load limits apply'}.`
+      : fullStack
+        ? ''
+        : ` ${state.version} ignores load limits without a minimum support.`;
   $('mode-about').textContent = MODES[c.mode].about + engine + support;
+
+  const note = $('version-note');
+  note.hidden = state.version === LATEST;
+  if (!note.hidden) {
+    mount(
+      note,
+      html`${state.version} is an older release, kept for comparison. Later releases fixed bugs that can show up here as failed checks; see the
+        <a href="${CHANGELOG}" target="_blank" rel="noopener">changelog</a>.`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------- running
@@ -346,7 +446,13 @@ function renderSolverBar(): void {
 let runToken = 0;
 let debounce = 0;
 let busyTimer = 0;
-let inFlight = false;
+/** Solver of the single run in progress. */
+let inFlight: Solver | null = null;
+
+function cancelRun(): void {
+  inFlight?.cancel();
+  inFlight = null;
+}
 
 function scheduleRun(): void {
   if (!$<HTMLInputElement>('auto-run').checked || state.comparing) return;
@@ -359,27 +465,30 @@ function setBusy(on: boolean, label = 'Solving…'): void {
   $('busy-label').textContent = label;
   if (on) busyTimer = window.setTimeout(() => ($('busy').hidden = false), 120);
   else $('busy').hidden = true;
-  $<HTMLButtonElement>('btn-run').disabled = state.comparing;
+  $<HTMLButtonElement>('btn-run').disabled = !!state.comparing;
+  $<HTMLSelectElement>('version').disabled = !!state.comparing;
 }
 
 async function run(): Promise<void> {
   if (state.comparing) return;
   clearTimeout(debounce);
   const token = ++runToken;
-  if (inFlight) solver.cancel();
+  cancelRun();
+  const version = state.version;
+  const solver = solverFor(version);
   const req: SolveRequest = structuredClone({ ...state.config, ...state.scenario });
-  inFlight = true;
+  inFlight = solver;
   setBusy(true);
   try {
     const res = await solver.solve(req);
     if (token !== runToken) return;
-    setRun(res.ok ? { req, res, checks: verify(req, res) } : null, res.error ?? '');
+    setRun(res.ok ? { version, req, res, checks: verify(req, res) } : null, res.error ?? '');
   } catch (err) {
     if (err instanceof Cancelled || token !== runToken) return;
     setRun(null, err instanceof Error ? err.message : String(err));
   } finally {
     if (token === runToken) {
-      inFlight = false;
+      inFlight = null;
       setBusy(false);
     }
   }
@@ -395,11 +504,12 @@ function setRun(r: Run | null, error = ''): void {
 
 function stop(): void {
   runToken++;
-  state.comparing = false;
-  solver.cancel();
-  inFlight = false;
+  state.comparing = '';
+  for (const s of solvers.values()) if (s.busy) s.cancel();
+  inFlight = null;
   setBusy(false);
   renderCompare();
+  renderVersions();
 }
 
 // ---------------------------------------------------------------- viewer
@@ -477,6 +587,15 @@ function play(): void {
   playing = requestAnimationFrame(tick);
 }
 
+const loadCache = new WeakMap<BinResult, number[]>();
+
+/** Weight resting on an item, computed here like the load check does. */
+function loadOn(bin: BinResult, it: PlacedItem): number {
+  let l = loadCache.get(bin);
+  if (!l) loadCache.set(bin, (l = loads(bin)));
+  return l[bin.items.indexOf(it)] ?? 0;
+}
+
 viewer.onHover = (it, x, y) => {
   const tip = $('tooltip');
   if (!it || !state.run) return void (tip.hidden = true);
@@ -489,7 +608,7 @@ viewer.onHover = (it, x, y) => {
     html`<div class="tt-head"><span class="swatch" style="--c:${coloring(state.colorMode, state.run.req.items, bin).color(it)}"></span><strong>${it.id}</strong></div>
       <div>${dims(it.w, it.h, it.d)}${rotated ? html` <span class="muted">(rotated from ${dims(s.w, s.h, s.d)})</span>` : ''}</div>
       <div>at x ${n2(it.x)}, y ${n2(it.y)}, z ${n2(it.z)}</div>
-      <div>${fmtKg(it.weight)} kg · ${Math.round(it.support * 100)}% supported · ${fmtKg(it.load)} kg on top</div>
+      <div>${fmtKg(it.weight)} kg · ${Math.round(it.support * 100)}% supported · ${fmtKg(loadOn(bin, it))} kg on top</div>
       ${flags.length ? html`<div>${flags.join(' · ')}</div>` : ''}
       <div class="muted">placed ${bin.items.indexOf(it) + 1} of ${bin.items.length}</div>`,
   );
@@ -533,6 +652,8 @@ function renderResult(): void {
   const st = res.stats;
   const catalog = isCatalogMode(req.mode);
   const costs = req.bins.some((b) => b.cost > 0);
+  const unlimited = (b: BinResult) => b.maxWeight <= 0 && rules(r.version).zeroWeightIsUnlimited;
+  const limits = res.bins.length === 0 || res.bins.some((b) => !unlimited(b));
 
   mount(
     el,
@@ -542,10 +663,11 @@ function renderResult(): void {
         <div class="stat"><div class="k">Boxes used</div><div class="v">${st.totalBins}</div>
           <div class="s">${catalog ? 'chosen from the catalog' : `of ${res.bins.length + res.unusedBins} in stock`}</div></div>
         <div class="stat"><div class="k">Average fill</div><div class="v">${n1(st.volumeUsedPct)}%</div><div class="s">of box volume</div></div>
-        <div class="stat"><div class="k">Weight used</div><div class="v">${n1(st.weightUsedPct)}%</div><div class="s">of the boxes' limits</div></div>
+        <div class="stat"><div class="k">Weight used</div><div class="v">${limits ? `${n1(st.weightUsedPct)}%` : '–'}</div>
+          <div class="s">${limits ? "of the boxes' limits" : 'no box has a limit'}</div></div>
         ${costs ? html`<div class="stat"><div class="k">Total cost</div><div class="v">${n2(st.totalCost)}</div><div class="s">sum of box prices</div></div>` : ''}
         <div class="stat"><div class="k">Solve time</div><div class="v">${time(res.elapsedMs)}</div>
-          <div class="s">${res.timedOut ? html`<span class="status warn"><span class="dot"></span>time limit hit, best so far</span>` : 'in WebAssembly'}</div></div>
+          <div class="s">${res.timedOut ? html`<span class="status warn"><span class="dot"></span>time limit hit, best so far</span>` : `GoPackX ${r.version} in WebAssembly`}</div></div>
         ${statusTile(r.checks)}
       </div>
       ${
@@ -558,7 +680,7 @@ function renderResult(): void {
               <td class="muted">${dims(b.w, b.h, b.d)}</td>
               <td class="num">${b.items.length}</td>
               <td><div class="bar"><div class="track"><div class="fill" style="width:${Math.min(100, b.volumePct)}%"></div></div><span>${n1(b.volumePct)}%</span></div></td>
-              <td class="num">${fmtKg(b.weight)} <span class="muted">/ ${fmtKg(b.maxWeight)} kg</span></td>
+              <td class="num">${fmtKg(b.weight)} <span class="muted">${unlimited(b) ? 'kg, no limit' : `/ ${fmtKg(b.maxWeight)} kg`}</span></td>
               ${costs ? html`<td class="num">${n2(b.cost)}</td>` : ''}
               <td>${quad(b.gravity)}</td>
             </tr>`,
@@ -585,10 +707,20 @@ function renderChecks(): void {
     return mount($('tab-checks'), html`<p class="muted">${state.error ? 'No result to check.' : 'No result yet.'}</p>`);
   }
   const s = summarize(r.checks);
+  const latest = r.version === LATEST;
+  // Before v0.3.0 load limits followed a narrower rule: say whether a failure breaks that one too.
+  const oldLoadRule = !rules(r.version).fullStackLoad && r.checks.some((c) => c.key === 'load' && c.status === 'fail');
   mount(badge, html`<span class="status ${s.failed ? 'bad' : 'good'}"><span class="dot"></span>${s.failed ? s.failed : ''}</span>`);
   mount(
     $('tab-checks'),
     html`<p class="intro">Every result is re-checked here in TypeScript, independently of the Go code that produced it: geometry, orientation, weight, fragile items, support and the reported numbers. A failure means the library returned something it should not have.</p>
+      ${
+        oldLoadRule
+          ? html`<p class="intro">The load check counts everything stacked on an item, with or without minimum support, as GoPackX does since v0.3.0. ${r.version} counted only the items touching it, and only with minimum support on, ${
+              keepsDirectLoadLimits(r.req, r.res) ? 'and this result keeps that rule.' : 'but this result breaks even that rule.'
+            }</p>`
+          : ''
+      }
       <ul class="checks">${r.checks.map(
         (c) => html`<li class="${c.status}">
           <span class="icon" aria-label="${c.status}">${c.status === 'pass' ? '✓' : c.status === 'fail' ? '✗' : '–'}</span>
@@ -596,8 +728,13 @@ function renderChecks(): void {
           <div>${c.detail}${c.failures.length ? html`<ul>${c.failures.map((f) => html`<li>${f}</li>`)}</ul>` : ''}</div>
         </li>`,
       )}</ul>
-      <p class="intro">${s.failed ? 'This looks like a bug in GoPackX.' : 'Found a result that looks wrong anyway?'}
-        <a id="issue-link" href="${issueUrl()}" target="_blank" rel="noopener">Open an issue on GitHub with this exact case</a>.</p>`,
+      ${
+        latest
+          ? html`<p class="intro">${s.failed ? 'This looks like a bug in GoPackX.' : 'Found a result that looks wrong anyway?'}
+              <a id="issue-link" href="${issueUrl()}" target="_blank" rel="noopener">Open an issue on GitHub with this exact case</a>.</p>`
+          : html`<div class="toolbar"><span class="muted">${r.version} is an older release.${s.failed ? ' The latest one may have fixed this.' : ''}</span>
+              <button type="button" class="ghost small" data-run-latest>Run this case on ${LATEST}</button></div>`
+      }`,
   );
 }
 
@@ -613,7 +750,7 @@ function issueUrl(): string {
   const body = [
     `**Case:** ${state.share || location.href}`,
     `**Solver:** ${setup}`,
-    `**Library:** gopackx ${state.info?.library ?? '?'} (${state.info?.goVersion ?? '?'}, js/wasm)`,
+    `**Library:** gopackx ${r.version} (${state.infos.get(r.version)?.goVersion ?? '?'}, js/wasm)`,
     `**Result:** ${r.res.stats.fittedItems}/${r.res.stats.totalItems} items in ${r.res.stats.totalBins} boxes`,
     '',
     failed.length ? '**Failed checks:**' : '',
@@ -626,7 +763,7 @@ function issueUrl(): string {
 }
 
 async function shareUrl(): Promise<string> {
-  const frag = await encode({ scenario: state.scenario, config: state.config });
+  const frag = await encode({ scenario: state.scenario, config: state.config, version: state.version });
   return `${location.origin}${location.pathname}#s=${frag}`;
 }
 
@@ -681,12 +818,13 @@ const cmp = (a: number[], b: number[]) => {
 async function runCompare(): Promise<void> {
   if (state.comparing) return;
   clearTimeout(debounce);
-  if (inFlight) solver.cancel();
-  inFlight = false;
-  runToken++;
-  state.comparing = true;
+  cancelRun();
+  const token = ++runToken;
+  state.comparing = 'engines';
   state.compare = compareRows(state.config);
   state.sort = { key: 'rank', dir: 1 };
+  const version = state.version;
+  const solver = solverFor(version);
   const scenario = structuredClone(state.scenario);
   renderCompare();
   for (let i = 0; i < state.compare.length; i++) {
@@ -695,16 +833,16 @@ async function runCompare(): Promise<void> {
     const req: SolveRequest = { ...row.config, ...scenario };
     try {
       const res = await solver.solve(req);
-      if (!state.comparing) return;
-      if (res.ok) row.run = { req, res, checks: verify(req, res) };
+      if (token !== runToken) return;
+      if (res.ok) row.run = { version, req, res, checks: verify(req, res) };
       else row.error = res.error;
     } catch (err) {
-      if (err instanceof Cancelled) return;
+      if (err instanceof Cancelled || token !== runToken) return;
       row.error = err instanceof Error ? err.message : String(err);
     }
     renderCompare();
   }
-  state.comparing = false;
+  state.comparing = '';
   setBusy(false);
   renderCompare();
 }
@@ -719,9 +857,10 @@ function renderCompare(): void {
       ? 'Runs Pack, Pack + Optimize and TrialPacking without lookahead with each of the five placement engines on this scenario.'
       : 'Runs the Packer with every engine and strategy, Branch & Bound with every engine (2 s limit each) and Parallel on this scenario.'
   } Minimum support and the time limit come from the solver settings. Click a row to see it in 3D.</p>`;
-  const button = state.comparing
-    ? html`<button type="button" class="ghost" data-stop-compare>Stop</button>`
-    : html`<button type="button" class="primary" data-run-compare>${rows.length ? 'Run again' : 'Run comparison'}</button>`;
+  const button =
+    state.comparing === 'engines'
+      ? html`<button type="button" class="ghost" data-stop-compare>Stop</button>`
+      : html`<button type="button" class="primary" data-run-compare ${state.comparing ? raw('disabled') : ''}>${rows.length ? 'Run again' : 'Run comparison'}</button>`;
   if (!rows.length) return mount(el, html`${intro}<div class="toolbar">${button}</div>`);
 
   const done = rows.filter((r) => r.run);
@@ -788,13 +927,87 @@ function renderCompare(): void {
   );
 }
 
+// ---------------------------------------------------------------- versions tab
+
+async function runVersions(): Promise<void> {
+  if (state.comparing) return;
+  clearTimeout(debounce);
+  cancelRun();
+  const token = ++runToken;
+  state.comparing = 'versions';
+  state.versions = RELEASES.map((r) => ({ version: r.version }));
+  const req: SolveRequest = structuredClone({ ...state.config, ...state.scenario });
+  renderVersions();
+  // One after the other, so the solve times are comparable.
+  for (const [i, row] of state.versions.entries()) {
+    setBusy(true, `Running GoPackX ${row.version} (${i + 1} of ${state.versions.length})…`);
+    try {
+      const res = await solverFor(row.version).solve(req);
+      if (token !== runToken) return;
+      if (res.ok) row.run = { version: row.version, req, res, checks: verify(req, res) };
+      else row.error = res.error;
+    } catch (err) {
+      if (err instanceof Cancelled || token !== runToken) return;
+      row.error = err instanceof Error ? err.message : String(err);
+    }
+    renderVersions();
+  }
+  state.comparing = '';
+  setBusy(false);
+  const mine = state.versions.find((r) => r.version === state.version);
+  if (mine) setRun(mine.run ?? null, mine.error ?? '');
+  renderVersions();
+}
+
+function renderVersions(): void {
+  const el = $('tab-versions');
+  const rows = state.versions;
+  const costs = hasCosts();
+  const running = state.comparing === 'versions';
+  const intro = html`<p class="intro">Runs this scenario with the same settings on every GoPackX release in the playground, one after the other, and checks each result with the same rules. Click a row to see it in 3D.</p>`;
+  const button = running
+    ? html`<button type="button" class="ghost" data-stop-versions>Stop</button>`
+    : html`<button type="button" class="primary" data-run-versions ${state.comparing ? raw('disabled') : ''}>${rows.length ? 'Run again' : `Run on ${RELEASES.length} versions`}</button>`;
+  const changelog = html`<a href="${CHANGELOG}" target="_blank" rel="noopener">What changed in each release</a>`;
+  if (!rows.length) return mount(el, html`${intro}<div class="toolbar">${button}${changelog}</div>`);
+
+  mount(
+    el,
+    html`${intro}<div class="toolbar">${button}${changelog}</div>
+      <div class="table-wrap"><table class="list">
+        <thead><tr><th>Version</th><th>Released</th><th class="num">Items</th><th class="num">Boxes</th><th class="num">Avg fill</th>${costs ? html`<th class="num">Cost</th>` : ''}<th class="num">Time</th><th>Checks</th></tr></thead>
+        <tbody>${rows.map((r, i) => {
+          const st = r.run?.res.stats;
+          const failed = r.run?.checks.filter((c) => c.status === 'fail') ?? [];
+          const released = RELEASES.find((x) => x.version === r.version)?.released ?? '';
+          return html`<tr data-version-row="${i}" class="${r.run && state.run === r.run ? 'current' : ''}">
+            <td>${r.version} ${r.version === LATEST ? html`<span class="tag">latest</span>` : ''}</td>
+            <td class="muted">${released}</td>
+            ${
+              r.error
+                ? html`<td colspan="${costs ? 5 : 4}" class="muted">${r.error}</td>`
+                : st
+                  ? html`<td class="num">${st.fittedItems}/${st.totalItems}</td><td class="num">${st.totalBins}</td><td class="num">${n1(st.volumeUsedPct)}%</td>${costs ? html`<td class="num">${n2(st.totalCost)}</td>` : ''}<td class="num">${time(r.run!.res.elapsedMs)}${r.run!.res.timedOut ? html` <span class="status warn" title="Time limit hit"><span class="dot"></span></span>` : ''}</td>`
+                  : html`<td colspan="${costs ? 5 : 4}" class="muted">${running ? 'waiting…' : 'stopped'}</td>`
+            }
+            <td>${
+              r.run
+                ? html`<span class="status ${failed.length ? 'bad' : 'good'}"><span class="dot"></span>${failed.length ? `${failed.length} failed: ${failed.map((c) => c.label.toLowerCase()).join(', ')}` : 'pass'}</span>`
+                : ''
+            }</td>
+          </tr>`;
+        })}</tbody>
+      </table></div>`,
+  );
+}
+
 // ---------------------------------------------------------------- code tab
 
 function renderCode(): void {
-  const code = generateGo({ ...state.config, ...state.scenario });
+  const code = generateGo({ ...state.config, ...state.scenario }, state.version);
   mount(
     $('tab-code'),
-    html`<p class="intro">The same scenario and settings as a Go program. Install the library with <code class="inline">go get github.com/jcoruiz/gopackx${state.info?.library && state.info.library !== 'unknown' ? '@' + state.info.library : ''}</code>, save this as <code class="inline">main.go</code> and <code class="inline">go run .</code></p>
+    html`<p class="intro">The same scenario and settings as a Go program. Install the library with <code class="inline">go get github.com/jcoruiz/gopackx@${state.version}</code>, save this as <code class="inline">main.go</code> and <code class="inline">go run .</code></p>
       <div class="toolbar"><button type="button" class="primary small" data-copy-code>Copy</button><button type="button" class="ghost small" data-download-code>Download main.go</button></div>
       <pre class="code"><code>${raw(highlightGo(code))}</code></pre>`,
   );
@@ -848,11 +1061,15 @@ function wire(): void {
     const opt = (k: string, def: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(Number(f.get(k)) || def)));
     const scenario = randomScenario({ items: opt('items', 300, 1, 5000), skus: opt('skus', 8, 1, 300), seed: opt('seed', 42, 0, 2 ** 31) });
     history.replaceState(null, '', location.pathname);
-    loadSnapshot({ scenario, config: state.config }, '');
+    loadSnapshot({ scenario, config: state.config, version: state.version }, '');
   });
 
   $('btn-export').addEventListener('click', () =>
-    download('gopackx-scenario.json', JSON.stringify({ scenario: state.scenario, config: state.config }, null, 2), 'application/json'),
+    download(
+      'gopackx-scenario.json',
+      JSON.stringify({ scenario: state.scenario, config: state.config, version: state.version } satisfies Snapshot, null, 2),
+      'application/json',
+    ),
   );
   $('btn-import').addEventListener('click', () => $('import-file').click());
   $('import-file').addEventListener('change', async (e) => {
@@ -878,6 +1095,16 @@ function wire(): void {
     }
   });
 
+  $('version').addEventListener('change', (e) => {
+    const v = (e.target as HTMLSelectElement).value;
+    setVersion(v);
+    // Reuse the result of a version comparison on this same case.
+    const done = state.versions.find((r) => r.version === v)?.run;
+    if (done) {
+      setRun(done);
+      renderVersions();
+    } else scheduleRun();
+  });
   $('btn-run').addEventListener('click', () => void run());
   $('btn-stop').addEventListener('click', stop);
   $('auto-run').addEventListener('change', (e) => (e.target as HTMLInputElement).checked && scheduleRun());
@@ -927,15 +1154,35 @@ function wire(): void {
     const row = state.compare[Number(t.closest<HTMLElement>('[data-row]')?.dataset.row)];
     if (row?.run) {
       state.config = { ...row.config };
+      if (state.versions.length) {
+        state.versions = [];
+        renderVersions();
+      }
       renderSolverBar();
       renderCode();
       setRun(row.run);
       renderCompare();
     }
   });
+  $('tab-versions').addEventListener('click', (e) => {
+    const t = e.target as HTMLElement;
+    if (t.closest('[data-run-versions]')) return void runVersions();
+    if (t.closest('[data-stop-versions]')) return stop();
+    const row = state.versions[Number(t.closest<HTMLElement>('[data-version-row]')?.dataset.versionRow)];
+    if (row?.run) {
+      setVersion(row.version);
+      setRun(row.run);
+      renderVersions();
+    }
+  });
+  $('tab-checks').addEventListener('click', (e) => {
+    if (!(e.target as HTMLElement).closest('[data-run-latest]')) return;
+    setVersion(LATEST);
+    void run();
+  });
   $('tab-code').addEventListener('click', async (e) => {
     const t = e.target as HTMLElement;
-    const code = generateGo({ ...state.config, ...state.scenario });
+    const code = generateGo({ ...state.config, ...state.scenario }, state.version);
     if (t.closest('[data-copy-code]')) {
       await navigator.clipboard.writeText(code);
       toast('Copied');
@@ -943,24 +1190,21 @@ function wire(): void {
   });
 }
 
+function renderFooter(): void {
+  const info = state.infos.get(state.version);
+  mount(
+    $('footer'),
+    html`<span>GoPackX ${state.version}${info ? ` · ${info.goVersion}` : ''} compiled to WebAssembly</span>
+      <a href="https://github.com/jcoruiz/gopackx-playground" target="_blank" rel="noopener">Playground source</a>
+      <a href="https://github.com/jcoruiz/gopackx/issues" target="_blank" rel="noopener">Report an issue</a>
+      <span>MIT licensed</span>`,
+  );
+}
+
 async function boot(): Promise<void> {
   setupSolverBar();
   wire();
-
-  solver.ready.then(
-    (info) => {
-      state.info = info;
-      mount(
-        $('footer'),
-        html`<span>gopackx ${info.library} · ${info.goVersion} compiled to WebAssembly</span>
-          <a href="https://github.com/jcoruiz/gopackx-playground" target="_blank" rel="noopener">Playground source</a>
-          <a href="https://github.com/jcoruiz/gopackx/issues" target="_blank" rel="noopener">Report an issue</a>
-          <span>MIT licensed</span>`,
-      );
-      renderCode();
-    },
-    (err: Error) => banner(`The solver could not start in this browser: ${err.message}. WebAssembly and Web Workers are required.`),
-  );
+  renderFooter();
 
   const hash = new URLSearchParams(location.hash.slice(1));
   const shared = hash.get('s');

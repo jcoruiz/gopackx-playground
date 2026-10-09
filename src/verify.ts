@@ -35,15 +35,65 @@ export function supportRatio(it: PlacedItem, bin: BinResult): number {
   return base > 0 ? supported / base : 0;
 }
 
-/** Weight resting on top of an item, each item above shared by contact area. */
-export function weightAbove(it: PlacedItem, bin: BinResult): number {
-  const top = it.y + it.h;
-  let total = 0;
-  for (const o of bin.items) {
-    if (o === it || Math.abs(o.y - top) > EPS || !touches(it, o)) continue;
-    total += o.weight * (footprint(it, o) / (o.w * o.d));
+/** Area of the base of above resting on the top face of under. */
+function contact(above: PlacedItem, under: PlacedItem): number {
+  if (Math.abs(above.y - (under.y + under.h)) > EPS || above.y <= under.y) return 0;
+  return footprint(above, under);
+}
+
+/**
+ * Weight resting on each item of a bin: everything stacked on it. Each item
+ * passes its own weight plus its load to the items right under it, in
+ * proportion to how much of its base rests on each, so an overhanging item
+ * still passes all of its weight down.
+ */
+export function loads(bin: BinResult): number[] {
+  const its = bin.items;
+  const load = new Array<number>(its.length).fill(0);
+  // Top first: an item's load is complete before it passes it down.
+  const order = its.map((_, i) => i).sort((a, b) => its[b].y - its[a].y);
+  for (const i of order) {
+    const a = its[i];
+    const under: [number, number][] = [];
+    let area = 0;
+    its.forEach((u, j) => {
+      const touch = j === i ? 0 : contact(a, u);
+      if (touch > EPS) {
+        under.push([j, touch]);
+        area += touch;
+      }
+    });
+    for (const [j, touch] of under) load[j] += ((a.weight + load[i]) * touch) / area;
   }
-  return total;
+  return load;
+}
+
+/**
+ * Load on each item under the rule GoPackX followed before v0.3.0: only the
+ * items resting right on it count, each with the share of its own base that
+ * touches it. Tells an old release's documented behavior apart from a bug.
+ */
+export function directLoads(bin: BinResult): number[] {
+  return bin.items.map((it) => {
+    let total = 0;
+    for (const o of bin.items) {
+      const touch = o === it ? 0 : contact(o, it);
+      if (touch > EPS) total += (o.weight * touch) / (o.w * o.d);
+    }
+    return total;
+  });
+}
+
+/** Whether a result keeps every load limit under the rule before v0.3.0, which only applied with stability on. */
+export function keepsDirectLoadLimits(req: SolveRequest, res: SolveResponse): boolean {
+  if (req.stability <= 0) return true;
+  return res.bins.every((bin) => {
+    const load = directLoads(bin);
+    return bin.items.every((it, i) => {
+      const limit = req.items[it.spec]?.loadBear ?? 0;
+      return limit <= 0 || load[i] <= limit + EPS;
+    });
+  });
 }
 
 class Builder {
@@ -139,14 +189,19 @@ export function verify(req: SolveRequest, res: SolveResponse): Check[] {
     checks.push(c.done('rotation', 'Valid orientation', 'Every item is a rotation of its input; upright items keep their height', (n) => plural(n, 'bad orientation')));
   }
 
-  // 5. Weight limit per box.
+  // 5. Weight limit per box. A limit of 0 means none.
   {
     const c = new Builder();
-    for (const bin of res.bins) {
+    const limited = res.bins.filter((b) => b.maxWeight > 0);
+    for (const bin of limited) {
       const w = bin.items.reduce((s, it) => s + it.weight, 0);
       if (w > bin.maxWeight + EPS) c.fail(`${bin.id} carries ${fmt(w)} kg, limit ${fmt(bin.maxWeight)} kg`);
     }
-    checks.push(c.done('weight', 'Weight limit', 'No box over its weight limit', (n) => plural(n, 'box', 'boxes') + ' overweight'));
+    checks.push(
+      limited.length === 0 && res.bins.length > 0
+        ? { key: 'weight', label: 'Weight limit', status: 'skip', detail: 'No box used has a weight limit', failures: [] }
+        : c.done('weight', 'Weight limit', 'No box over its weight limit', (n) => plural(n, 'box', 'boxes') + ' overweight'),
+    );
   }
 
   // 6. Nothing rests directly on a fragile item.
@@ -169,7 +224,7 @@ export function verify(req: SolveRequest, res: SolveResponse): Check[] {
     );
   }
 
-  // 7 and 8. Support and load bearing, only enforced with stability on.
+  // 7. Support, only required with stability on.
   const stable = req.stability > 0;
   {
     const c = new Builder();
@@ -186,29 +241,26 @@ export function verify(req: SolveRequest, res: SolveResponse): Check[] {
         : { key: 'support', label: 'Support', status: 'skip', detail: `Stability off, items may overhang (${worstPct})`, failures: [] },
     );
   }
+
+  // 8. Load limits: the whole stack on an item counts, with or without stability.
   {
     const c = new Builder();
     let limited = 0;
-    for (const { it, bin } of placed) {
-      const s = specOf(it);
-      if (!s || s.loadBear <= 0) continue;
-      limited++;
-      const load = weightAbove(it, bin);
-      if (load > s.loadBear + EPS) c.fail(`${it.id} holds ${fmt(load)} kg, limit ${fmt(s.loadBear)} kg`);
-    }
-    if (limited === 0) {
-      checks.push({ key: 'load', label: 'Load bearing', status: 'skip', detail: 'No items with a load limit placed', failures: [] });
-    } else if (!stable) {
-      checks.push({
-        key: 'load',
-        label: 'Load bearing',
-        status: 'skip',
-        detail: `Only enforced with stability on, as documented${c.count ? `. ${plural(c.count, 'item')} over the limit now` : ''}`,
-        failures: c.failures,
+    for (const bin of res.bins) {
+      if (!bin.items.some((it) => (specOf(it)?.loadBear ?? 0) > 0)) continue;
+      const load = loads(bin);
+      bin.items.forEach((it, i) => {
+        const limit = specOf(it)?.loadBear ?? 0;
+        if (limit <= 0) return;
+        limited++;
+        if (load[i] > limit + EPS) c.fail(`${it.id} holds ${fmt(load[i])} kg, limit ${fmt(limit)} kg`);
       });
-    } else {
-      checks.push(c.done('load', 'Load bearing', `${plural(limited, 'item')} within their load limit`, (n) => plural(n, 'item') + ' overloaded'));
     }
+    checks.push(
+      limited === 0
+        ? { key: 'load', label: 'Load bearing', status: 'skip', detail: 'No items with a load limit placed', failures: [] }
+        : c.done('load', 'Load bearing', `${plural(limited, 'item')} within their load limit, counting the whole stack`, (n) => plural(n, 'item') + ' overloaded'),
+    );
   }
 
   // 9. Boxes: stock respected in fixed modes, known type in catalog modes.

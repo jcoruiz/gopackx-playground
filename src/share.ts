@@ -14,13 +14,18 @@ import {
   type SolverConfig,
   type StrategyName,
 } from './types';
+import { RELEASES, isRelease } from './versions';
 
 export interface Snapshot {
   scenario: Scenario;
   config: SolverConfig;
+  /** GoPackX release. Missing when a preset is loaded: keep the current one. */
+  version?: string;
 }
 
 const MAX_LINES = 300;
+// Links and exports made before the version selector ran this release.
+const BEFORE_SELECTOR = 'v0.2.2';
 const MAX_NAME = 60;
 
 const b64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -90,5 +95,6 @@ export function sanitize(input: unknown): Snapshot {
     bbFull: cf.bbFull === true,
     timeoutMs: int(cf.timeoutMs, DEFAULT_CONFIG.timeoutMs, 100, 60_000),
   };
-  return { scenario: { bins, items }, config };
+  const version = isRelease(o.version) ? o.version : o.version === undefined && isRelease(BEFORE_SELECTOR) ? BEFORE_SELECTOR : RELEASES[0].version;
+  return { scenario: { bins, items }, config, version };
 }
