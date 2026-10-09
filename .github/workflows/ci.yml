@@ -13,18 +13,22 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.2'
-          cache-dependency-path: wasm/go.sum
+          cache-dependency-path: wasm/versions/*.sum
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - name: Go tests (native and js/wasm)
+      - name: Go tests against every GoPackX version (native and js/wasm)
         working-directory: wasm
         run: |
-          go vet ./...
-          go test -race ./...
-          PATH="$(go env GOROOT)/lib/wasm:$PATH" GOOS=js GOARCH=wasm go test ./...
+          for mod in versions/*.mod; do
+            echo "::group::$mod"
+            go vet -modfile="$mod" ./...
+            go test -race -modfile="$mod" ./...
+            PATH="$(go env GOROOT)/lib/wasm:$PATH" GOOS=js GOARCH=wasm go test -modfile="$mod" ./...
+            echo "::endgroup::"
+          done
       - run: npm ci
-      - name: Every preset, solver and engine through the independent checks; generated Go compiles
+      - name: Every version, preset, solver and engine through the independent checks; generated Go compiles
         run: npm test
       - run: npm run build
