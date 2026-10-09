@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.2'
+          cache-dependency-path: wasm/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Go tests (native and js/wasm)
+        working-directory: wasm
+        run: |
+          go vet ./...
+          go test -race ./...
+          PATH="$(go env GOROOT)/lib/wasm:$PATH" GOOS=js GOARCH=wasm go test ./...
+      - run: npm ci
+      - name: Every preset, solver and engine through the independent checks; generated Go compiles
+        run: npm test
+      - run: npm run build
