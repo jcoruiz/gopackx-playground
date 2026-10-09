@@ -843,7 +843,7 @@ table.list th button {
   gap: 2px;
 }
 
-.checks li {
+.checks > li {
   display: grid;
   grid-template-columns: 22px 190px 1fr;
   gap: 8px;
@@ -851,7 +851,7 @@ table.list th button {
   border-radius: 6px;
 }
 
-.checks li:nth-child(odd) {
+.checks > li:nth-child(odd) {
   background: var(--surface-2);
 }
 
@@ -993,11 +993,11 @@ code.inline {
     flex-basis: 100%;
   }
 
-  .checks li {
+  .checks > li {
     grid-template-columns: 22px 1fr;
   }
 
-  .checks li > :last-child {
+  .checks > li > :last-child {
     grid-column: 2;
   }
 }
