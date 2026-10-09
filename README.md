@@ -1,0 +1,64 @@
+# GoPackX Playground
+
+Try [GoPackX](https://github.com/jcoruiz/gopackx), a 3D bin packing library for Go, in your browser: **https://gopackx.than.cl**
+
+The library is compiled to WebAssembly and runs in a Web Worker on your machine. There is no backend: scenarios, results and timings never leave the page.
+
+## What you can do
+
+- **Pack** a scenario with any solver: `gopackx.Pack`, `Pack` + `Optimize()`, TrialPacking, the VNS metaheuristic, the Packer with any of the 7 strategies, Branch & Bound and Parallel.
+- **Pick the placement engine** (Pivot Points, Extreme Points, MaxRects, LAFF, LAFF Fast), the minimum support ratio and a time limit.
+- **See it in 3D**, box by box, and replay the placement order. Color by item type, group, constraints, weight or support.
+- **Check every result independently.** A TypeScript re-implementation of the rules verifies each answer: every item accounted for, inside its box, no overlaps, valid rotations (upright items keep their height), weight limits, nothing on fragile items, support ratio and load bearing when stability is on, box stock, and the reported statistics.
+- **Compare** every engine and strategy on the same scenario, ranked by items packed, boxes (or cost) and fill.
+- **Get the Go code** for the current scenario and settings, ready for `go run`.
+- **Share a case** as a link (the scenario is compressed into the URL fragment) or open a GitHub issue with it in one click.
+
+Six scenarios are built in: an office supply order (the README example), cost-aware shipping, a van with fragile, upright and load-limited items, a mixed pallet, a perfect-fit puzzle and a seeded stress test you can scale to 5,000 items.
+
+## How it works
+
+```
+wasm/        Go bridge: JSON in, JSON out, compiled with GOOS=js GOARCH=wasm
+  solve.go     request → gopackx solver/engine/strategy → response
+  main_js.go   registers gopackxSolve() for JavaScript
+  main_cli.go  same request natively: go run ./wasm < request.json
+src/         Vite + TypeScript + Three.js front end
+  worker.ts    loads the WASM in a Web Worker (Stop = terminate the worker)
+  verify.ts    the independent checks
+  codegen.ts   scenario → Go program
+  viewer.ts    one InstancedMesh per box, so thousands of items stay smooth
+test/        Vitest: runs the real WASM build in Node
+```
+
+Two details of running Go in the browser:
+
+- Under `GOOS=js` there is one thread and no preemption, so the timer behind `context.WithTimeout` never fires while a solver is busy. The bridge passes a context whose `Err()` reads the clock, which works because GoPackX polls `ctx.Err()`.
+- `wasm_exec.js` has to come from the same Go toolchain that built the binary. `scripts/build-wasm.sh` copies both.
+
+## Development
+
+Requires Go 1.24+ and Node 22.
+
+```bash
+npm ci
+npm run dev        # builds the WASM, then starts Vite
+npm test           # every preset × solver × engine through the checks, and the generated Go through gofmt and go vet
+npm run build      # production build in dist/
+```
+
+Go tests, natively and as WebAssembly:
+
+```bash
+cd wasm
+go test -race ./...
+PATH="$(go env GOROOT)/lib/wasm:$PATH" GOOS=js GOARCH=wasm go test ./...
+```
+
+## Deployment
+
+AWS Amplify Hosting builds `main` on every push with `amplify.yml` (Go 1.27 for the WASM, Node 22 for Vite). `customHttp.yml` sets the security headers, cross-origin isolation (full-resolution timers for the solve times) and long caching for hashed assets.
+
+## License
+
+[MIT](LICENSE)
